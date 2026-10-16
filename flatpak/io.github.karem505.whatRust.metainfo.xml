@@ -62,6 +62,12 @@
   </screenshots>
 
   <releases>
+    <release type="stable" version="0.6.8" date="2026-10-16">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.8</url>
+      <description>
+        <p>Adds an option to hide the menu bar icon on macOS, fixes a blank Display size list and shows the app logo on notifications on Windows.</p>
+      </description>
+    </release>
     <release type="stable" version="0.6.7" date="2026-10-10">
       <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.7</url>
       <description>
