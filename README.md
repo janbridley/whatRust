@@ -53,7 +53,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Native OS notifications** for new messages
 - **Display size** — a Smaller / Small / Default / Big page zoom in Settings, so the chat list stops crowding out the conversation on a high-DPI screen
 - **Persistent login** — scan the QR code once, stay signed in across restarts
-- **Voice messages** everywhere, plus **voice & video calls** on macOS (WhatsApp Web doesn't offer calls on Windows, and most Linux distros build WebKitGTK without WebRTC — see the FAQ)
+- **Voice messages** everywhere, plus **voice & video calls** on macOS (WhatsApp Web doesn't offer calls on Windows, and whatRust's Linux builds can't place calls — see the FAQ)
 - **Drag and drop files and images** — drop a photo, video, or document straight onto a chat to attach it
 - **Links open in your browser** — web, email, and phone links in chats go to your default apps; WhatsApp links (`wa.me`, group invites) stay in the app
 - **Opens `whatsapp://` links** — "Open app" / click-to-chat buttons on websites open the chat in whatRust (registered by the installers, the `.deb`, the Flatpak, and the one-line AppImage install)
@@ -199,7 +199,7 @@ Voice messages work on every platform — whatRust grants the webview microphone
 
 - **macOS:** yes. whatRust presents itself as the Safari that ships with your macOS — which is exactly what WKWebView is — so WhatsApp Web uses its Safari calling path.
 - **Windows:** no. WhatsApp Web doesn't offer calls to Windows browsers at all — it shows *"Make calls with the Windows app"* even in Chrome or Edge — and whatRust won't disguise your OS to get around Meta's decision. Use the official WhatsApp app for calls on Windows.
-- **Linux:** most distributions build WebKitGTK **without** WebRTC, so WhatsApp correctly reports that calling isn't supported. This is an engine limitation, not a permissions problem — if your distro ships a WebRTC-enabled WebKitGTK, calls light up automatically.
+- **Linux:** no. WhatsApp shows *"Your browser doesn't support calling"*, and that is accurate. The AppImage ships its own WebKitGTK, built **without** WebRTC, so what your distro has installed makes no difference there; the `.deb` and Flatpak use your distro's or the GNOME runtime's WebKitGTK, which usually lacks it too. Even a WebRTC-enabled WebKitGTK isn't enough today, because whatRust presents itself to WhatsApp as Chrome on Linux and WebKit can't run WhatsApp's Chrome calling path. This is an engine limitation, not a permissions problem — use the WhatsApp app on your phone for calls.
 
 ### Can I use multiple WhatsApp accounts in whatRust?
 Yes. whatRust supports **multiple WhatsApp accounts** running at the same time — each opens in its own window with a fully isolated session, so different numbers stay logged in independently. Add, rename, and remove accounts from **Settings → Accounts**. On macOS this requires macOS 14 or later; Linux and Windows have no limit.
