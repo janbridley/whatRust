@@ -29,12 +29,35 @@ pub fn register(app: &AppHandle) {
         let config = app.config();
         let aumid = &config.identifier;
         let display = config.product_name.as_deref().unwrap_or("whatRust");
-        win::register(aumid, display);
+        let icon = app
+            .path()
+            .app_local_data_dir()
+            .ok()
+            .and_then(|dir| write_icon(&dir));
+        win::register(aumid, display, icon.as_deref());
     }
+}
+
+/// The logo Windows shows in the toast header (issue #40). The registry's
+/// `IconUri` must name an image file, so the bundled PNG is written next to the
+/// app's data; it is rewritten only when its bytes differ.
+#[cfg(windows)]
+fn write_icon(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    const ICON: &[u8] = include_bytes!("../icons/128x128.png");
+    let path = dir.join("notification-logo.png");
+    if std::fs::read(&path).ok().as_deref() != Some(ICON) {
+        let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, ICON));
+        if let Err(e) = written {
+            crate::dlog::log(&format!("aumid: could not write the toast logo: {e}"));
+            return None;
+        }
+    }
+    Some(path)
 }
 
 #[cfg(windows)]
 mod win {
+    use std::path::Path;
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
@@ -47,10 +70,10 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn register(aumid: &str, display_name: &str) {
+    pub fn register(aumid: &str, display_name: &str, icon: Option<&Path>) {
         // Step 1 — the registry entry is what makes the Action Center render
         // the toast for an unpackaged desktop app.
-        match write_registry(aumid, display_name) {
+        match write_registry(aumid, display_name, icon) {
             Ok(()) => crate::dlog::log(&format!(
                 "aumid: HKCU\\Software\\Classes\\AppUserModelId\\{aumid} registered"
             )),
@@ -70,9 +93,14 @@ mod win {
     }
 
     /// Writes `HKCU\Software\Classes\AppUserModelId\<AUMID>` with a `DisplayName`
-    /// (REG_SZ). Idempotent — overwritten on every launch, which also self-heals
-    /// a Start-Menu shortcut that lost its AUMID property.
-    fn write_registry(aumid: &str, display_name: &str) -> windows::core::Result<()> {
+    /// and, when the logo was written, an `IconUri` (both REG_SZ). Idempotent —
+    /// overwritten on every launch, which also self-heals a Start-Menu shortcut
+    /// that lost its AUMID property.
+    fn write_registry(
+        aumid: &str,
+        display_name: &str,
+        icon: Option<&Path>,
+    ) -> windows::core::Result<()> {
         let subkey = wide(&format!("Software\\Classes\\AppUserModelId\\{aumid}"));
         let mut hkey = HKEY(std::ptr::null_mut());
         unsafe {
@@ -90,17 +118,24 @@ mod win {
             .ok()?;
         }
 
-        // REG_SZ data is the NUL-terminated UTF-16 bytes of the display name.
-        let name = wide("DisplayName");
-        let data = wide(display_name);
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data[..]))
-        };
-        let set = unsafe { RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes)) };
+        let mut set = set_sz(hkey, "DisplayName", display_name);
+        if let (Ok(()), Some(icon)) = (&set, icon) {
+            set = set_sz(hkey, "IconUri", &icon.to_string_lossy());
+        }
         // Always close the key, then surface any set error.
         unsafe {
             let _ = RegCloseKey(hkey);
         }
-        set.ok()
+        set
+    }
+
+    /// One REG_SZ value; its data is the NUL-terminated UTF-16 bytes of `value`.
+    fn set_sz(hkey: HKEY, name: &str, value: &str) -> windows::core::Result<()> {
+        let name = wide(name);
+        let data = wide(value);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data[..]))
+        };
+        unsafe { RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes)) }.ok()
     }
 }

@@ -91,7 +91,10 @@ select {
   background-repeat: no-repeat;
   background-position: right 10px center;
 }
-select option { color: initial; }
+/* The open list is drawn by the engine, not by the select's transparent box:
+   on WebView2 that left it white while the text followed the dark theme
+   (issue #40), so give the options the page's own colours explicitly. */
+select option { background-color: var(--bg); color: var(--fg); }
 
 /* Checkbox drawn as an Adwaita-style switch. */
 input.switch {
