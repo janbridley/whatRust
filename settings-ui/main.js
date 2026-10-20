@@ -1,9 +1,26 @@
 const invoke = window.__TAURI__.core.invoke;
 const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_popup", "menubar_only"];
-// The menu-bar icon can only be hidden on macOS, where the Dock icon still
-// brings the window back (issue #44).
-const IS_MAC = /Mac/.test(navigator.platform || navigator.userAgent);
 const ZOOM_DEFAULT = 1;
+
+// The menu-bar rows are macOS-only. get_settings reports the OS this build targets
+// in `platform`; the rows start hidden and appear here once it is known.
+function setMacRows(visible) {
+  document.querySelectorAll(".mac-only").forEach((el) => (el.hidden = !visible));
+}
+
+// The "Show menu bar icon" subtitle as authored in the markup; kept so it can
+// be restored when menu-bar-only is turned back off.
+let menuBarIconSubtitle = "";
+
+// In menu-bar-only mode the tray icon is the app's only entry point and the
+// backend keeps it visible, so the switch is locked on.
+function syncMenuBarIconRow() {
+  const only = document.getElementById("menubar_only").checked;
+  document.getElementById("menu_bar_icon").disabled = only;
+  document.getElementById("menu_bar_icon_subtitle").textContent = only
+    ? "The tray icon is the only entry point in menu-bar-only mode, so it stays visible"
+    : menuBarIconSubtitle;
+}
 
 // settings.json holds a zoom factor, not a preset name, so a stored value need
 // not be one of the four options offered here — it can come from a hand edit or
@@ -16,13 +33,14 @@ function selectNearestZoom(value) {
 
 async function load() {
   const s = await invoke("get_settings");
-  document.getElementById("menu_bar_icon_row").hidden = !IS_MAC;
+  setMacRows(s.platform === "macos");
   for (const f of BOOLS) {
     const el = document.getElementById(f);
     if (el) el.checked = !!s[f];
   }
   document.getElementById("hotkey").value = s.hotkey || "CmdOrCtrl+Shift+W";
   selectNearestZoom(Number.isFinite(s.zoom) ? s.zoom : ZOOM_DEFAULT);
+  syncMenuBarIconRow();
 }
 
 async function save() {
@@ -158,10 +176,9 @@ async function addAccount() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  // Menu bar features are macOS-only; hide the toggles elsewhere.
-  if (!/Macintosh|Mac OS X/.test(navigator.userAgent)) {
-    document.querySelectorAll(".mac-only").forEach((el) => (el.hidden = true));
-  }
+  // The macOS rows stay hidden until load() knows the platform.
+  menuBarIconSubtitle = document.getElementById("menu_bar_icon_subtitle").textContent;
+  document.getElementById("menubar_only").addEventListener("change", syncMenuBarIconRow);
   load();
   loadAccounts();
   loadLock();
