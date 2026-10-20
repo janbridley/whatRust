@@ -17,6 +17,10 @@ pub struct Settings {
     pub menubar_only: bool,
     /// Display zoom for the WhatsApp webview, 1.0 = the site's own sizing.
     pub zoom: f64,
+    /// macOS only (issue #44): show the icon in the menu bar. With it off, the
+    /// Dock icon brings a hidden window back. Windows and Linux always show the
+    /// tray icon, since there it is the only way back to a hidden window.
+    pub menu_bar_icon: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +35,7 @@ impl Default for Settings {
             menubar_popup: true,
             menubar_only: false,
             zoom: 1.0,
+            menu_bar_icon: true,
         }
     }
 }
@@ -145,6 +150,7 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
     // Zoom is a webview property, so it applies on every platform and takes
     // effect on the open account windows without a reload.
     crate::window::apply_zoom_all(app, s.zoom);
+    crate::tray::apply_visibility(app, s.menu_bar_icon);
 
     // macOS menu-bar modes: reconcile the live window set with the settings.
     #[cfg(target_os = "macos")]
@@ -202,7 +208,11 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
             let result = if s.autostart {
                 autostart.enable()
             } else {
-                autostart.disable()
+                // Windows reports NotFound when removing a Run entry that isn't
+                // there, so turning off what is already off would warn.
+                autostart
+                    .is_enabled()
+                    .and_then(|on| if on { autostart.disable() } else { Ok(()) })
             };
             if let Err(e) = result {
                 warnings.push(format!("autostart could not be updated: {e}"));
@@ -268,6 +278,7 @@ mod tests {
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");
         assert!(!s.autostart);
         assert_eq!(s.zoom, 1.0);
+        assert!(s.menu_bar_icon);
     }
 
     #[test]
@@ -305,6 +316,8 @@ mod tests {
         assert!(s.autostart);
         assert!(s.close_to_tray);
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");
+        // Absent in a settings.json written before issue #44: keep the icon.
+        assert!(s.menu_bar_icon);
     }
 
     #[test]
