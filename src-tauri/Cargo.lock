@@ -4699,6 +4699,7 @@ version = "0.6.8"
 dependencies = [
  "argon2",
  "block2",
+ "dispatch2",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",

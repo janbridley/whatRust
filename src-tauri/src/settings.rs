@@ -9,11 +9,13 @@ pub struct Settings {
     pub hotkey_enabled: bool,
     pub hotkey: String,
     pub notifications: bool,
-    /// macOS: clicking the tray icon toggles a small WhatsApp popup anchored under
-    /// the menu bar icon, instead of raising the main window. Ignored elsewhere.
+    /// macOS only: clicking the tray icon opens the account's own window,
+    /// restyled as a compact panel under the menu bar icon, instead of
+    /// raising it. Off by default. Ignored on other platforms.
     pub menubar_popup: bool,
-    /// macOS: the app lives ONLY in the menu bar popup, no dock icon or main window.
-    /// Ignored elsewhere.
+    /// macOS only: the app lives in the menu bar, no Dock icon and no
+    /// standard window. Every account stays connected in the background and
+    /// opens as a panel from the tray. Ignored on other platforms.
     pub menubar_only: bool,
     /// Display zoom for the WhatsApp webview, 1.0 = the site's own sizing.
     pub zoom: f64,
@@ -32,7 +34,7 @@ impl Default for Settings {
             hotkey_enabled: true,
             hotkey: "CmdOrCtrl+Shift+W".to_string(),
             notifications: true,
-            menubar_popup: true,
+            menubar_popup: false,
             menubar_only: false,
             zoom: 1.0,
             menu_bar_icon: true,
@@ -150,28 +152,29 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
     // Zoom is a webview property, so it applies on every platform and takes
     // effect on the open account windows without a reload.
     crate::window::apply_zoom_all(app, s.zoom);
+
+    // In menu-bar-only mode the tray icon is the app's only entry point, so
+    // it can never be hidden.
+    #[cfg(target_os = "macos")]
+    crate::tray::apply_visibility(app, s.menu_bar_icon || s.menubar_only);
+    #[cfg(not(target_os = "macos"))]
     crate::tray::apply_visibility(app, s.menu_bar_icon);
 
     // macOS menu-bar modes: reconcile the live window set with the settings.
     #[cfg(target_os = "macos")]
     {
         if s.menubar_only {
-            // No account windows in this mode -> the popup *is* the app. Destroy any
-            // strays (a live toggle of the setting) and keep the popup connected.
-            for (label, w) in app.webview_windows() {
-                if label.starts_with("wa-") && label != crate::window::MENUBAR_LABEL {
-                    let _ = w.destroy();
-                }
-            }
-            crate::window::menubar_ensure_started(app);
-        } else {
-            // Ensure every account has its window back (a live toggle off).
+            crate::menubar::enter_only(app);
+        } else if crate::menubar::leave_only(app) {
+            // Leaving menu-bar-only mode: reopen missing windows and show the
+            // active one, so the app is never left with no visible window.
             for a in crate::accounts::load(app).accounts {
                 let label = crate::accounts::window_label(&a.id);
                 if app.get_webview_window(&label).is_none() {
-                    let _ = crate::window::open_account_window(app, &a, s.start_minimized);
+                    let _ = crate::window::open_account_window(app, &a, true);
                 }
             }
+            crate::window::show_active(app);
         }
 
         // Menu-bar-only apps have no Dock presence.
@@ -184,6 +187,9 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         let _ = app.run_on_main_thread(move || {
             let _ = h.set_activation_policy(policy);
         });
+
+        // Hold the App Nap shield only while menu-bar-only mode is on.
+        crate::menubar::set_keep_alive(s.menubar_only);
     }
 
     #[cfg(desktop)]
@@ -274,7 +280,9 @@ mod tests {
         let s = Settings::default();
         assert!(s.close_to_tray);
         assert!(s.notifications);
-        assert!(s.menubar_popup);
+        // Both menu-bar modes are opt-in.
+        assert!(!s.menubar_popup);
+        assert!(!s.menubar_only);
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");
         assert!(!s.autostart);
         assert_eq!(s.zoom, 1.0);

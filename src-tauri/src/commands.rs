@@ -92,17 +92,9 @@ pub fn set_unread(
     settled: Option<bool>,
 ) {
     let count = crate::unread::parse_unread(&title);
-    // The menu bar popup shares an account's session but carries its own label
-    // (`wa-menubar`); its unread count belongs to the account it mirrors, so it
-    // is attributed to the active account.
-    let label = if window.label() == crate::window::MENUBAR_LABEL {
-        app.try_state::<ActiveAccount>()
-            .map(|a| a.lock().unwrap().clone())
-            .unwrap_or_default()
-    } else {
-        window.label().to_string()
-    };
-    let Some(id) = accounts::id_from_label(&label) else {
+    // A menu-bar panel carries its account's own `wa-<id>` label, so the
+    // count is attributed to that account.
+    let Some(id) = accounts::id_from_label(window.label()) else {
         return;
     };
 
@@ -123,19 +115,40 @@ pub fn set_unread(
     // user hears about it even when WhatsApp raises its own notification where
     // whatRust can't see it (issue #3). Covered by a real notification, this
     // stays silent; see notify::unread_increased.
-    let focused = window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false);
+    let mut focused = window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false);
+    #[cfg(target_os = "macos")]
+    if focused && crate::menubar::is_stealthed(window.label()) {
+        // A dismissed panel is ordered in and may still be the key window,
+        // but the user is not looking at it. WhatsApp's page also believes it
+        // is foreground and raises no notification of its own, so the
+        // fallback must fire.
+        focused = false;
+    }
     if crate::notify::fallback_due(previous, count, focused, settled.unwrap_or(false)) {
         crate::notify::unread_increased(&app, window.label(), count);
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct SettingsView {
+    /// Flattened, so the UI reads `settings.menubar_popup`  directly off the response.
+    #[serde(flatten)]
+    pub settings: Settings,
+    /// The OS this build targets ("macos" | "linux" | "windows").
+    /// The settings UI shows the platform-only rows only on macOS.
+    pub platform: &'static str,
+}
+
 #[tauri::command]
-pub fn get_settings(window: tauri::Window, app: tauri::AppHandle) -> Result<Settings, String> {
+pub fn get_settings(window: tauri::Window, app: tauri::AppHandle) -> Result<SettingsView, String> {
     if is_remote(&window) {
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
-    Ok(crate::settings::load(&app))
+    Ok(SettingsView {
+        settings: crate::settings::load(&app),
+        platform: std::env::consts::OS,
+    })
 }
 
 #[tauri::command]
@@ -236,7 +249,13 @@ pub async fn add_account(
     let acct = accounts::add(&mut f, name);
     accounts::save(&app, &f).map_err(|e| e.to_string())?;
 
-    if let Err(e) = crate::window::open_account_window(&app, &acct, false) {
+    // In menu-bar-only mode the window is created hidden and presented as a
+    // panel right after, so no full-size window flashes.
+    #[cfg(target_os = "macos")]
+    let start_hidden = crate::settings::load(&app).menubar_only;
+    #[cfg(not(target_os = "macos"))]
+    let start_hidden = false;
+    if let Err(e) = crate::window::open_account_window(&app, &acct, start_hidden) {
         // Don't leave an account behind that never got a window. The sequence
         // number stays consumed, so a retry gets a fresh profile id.
         f.accounts.retain(|a| a.id != acct.id);
@@ -245,6 +264,11 @@ pub async fn add_account(
         return Err(e.to_string());
     }
     crate::tray::rebuild_menu(&app);
+    // Opens the new account as a panel: also how the user reaches its QR login.
+    #[cfg(target_os = "macos")]
+    if start_hidden {
+        crate::window::show_account(&app, &accounts::window_label(&acct.id));
+    }
 
     Ok(AccountView {
         id: acct.id,

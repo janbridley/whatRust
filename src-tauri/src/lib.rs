@@ -7,6 +7,8 @@ mod dlog;
 mod downloads;
 mod links;
 mod lock;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod menubar;
 mod notif_icon;
 mod notify;
 mod opener;
@@ -82,14 +84,15 @@ pub fn run() {
             .plugin(
                 // Restore size/position, but NOT visibility — otherwise the plugin
                 // force-shows the window on launch and defeats start-minimized / --minimized.
+                // Decorations are never persisted either: windows are always
+                // decorated, so a saved value can only be the menu-bar panel's
+                // transient borderless state leaking into the next launch.
                 tauri_plugin_window_state::Builder::default()
                     .with_state_flags(
                         tauri_plugin_window_state::StateFlags::all()
-                            & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                            & !tauri_plugin_window_state::StateFlags::VISIBLE
+                            & !tauri_plugin_window_state::StateFlags::DECORATIONS,
                     )
-                    // The menu bar popup sizes/positions itself from the tray icon
-                    // rect on every open; persisted geometry would fight that.
-                    .skip_initial_state(crate::window::MENUBAR_LABEL)
                     .build(),
             )
             .plugin(
@@ -185,30 +188,23 @@ pub fn run() {
             handle.manage(lock::LockState::new(!lock_on_launch));
             let open_hidden = start_hidden || lock_on_launch;
 
-            // Open every account window so each one receives messages/notifications —
-            // except macOS menu-bar-only mode, where the popup IS the app and is
-            // created (stealthed but connected) instead.
-            let menubar_only = cfg!(target_os = "macos") && s.menubar_only;
-            if menubar_only {
-                #[cfg(target_os = "macos")]
-                window::menubar_ensure_started(handle);
-            } else {
-                for a in &f.accounts {
-                    window::open_account_window(handle, a, open_hidden)?;
-                }
+            // Open every account window so each one receives messages/notifications.
+            // In menu-bar-only mode they stay permanently invisible (ordered in,
+            // alpha 0, click-through) so every account stays connected; the tray opens
+            // them as panels.
+            #[cfg(target_os = "macos")]
+            let open_hidden = open_hidden || s.menubar_only;
+            for a in &f.accounts {
+                window::open_account_window(handle, a, open_hidden)?;
             }
-
-            // App Nap kills background webviews' JS, which releases WhatsApp's socket.
-            // Background the activity process so it never disconnects
             #[cfg(target_os = "macos")]
             {
-                use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-                let reason = NSString::from_str("whatRust keeps its WhatsApp session connected");
-                let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
-                    NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
-                    &reason,
-                );
-                std::mem::forget(activity); // hold for the process lifetime
+                // Seed the mode tracker before the settings::apply below, so
+                // the launch state does not read as a live toggle.
+                menubar::note_mode(s.menubar_only);
+                if s.menubar_only {
+                    menubar::enter_only(handle);
+                }
             }
 
             tray::setup(handle)?;
@@ -254,6 +250,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building whatRust")
         .run(|_app_handle, _event| {
+            // Give restyled panels their real geometry back before the exit
+            // saves window state. The tray Quit path does the same.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::ExitRequested { .. } = &_event {
+                menubar::restore_all(_app_handle);
+            }
+
             // macOS delivers scheme links (whatsapp://…, issue #23) as an Apple
             // event rather than a command-line argument, at launch or later.
             #[cfg(target_os = "macos")]
@@ -268,13 +271,16 @@ pub fn run() {
 
             // macOS: clicking the dock icon after hide-to-tray re-shows the window
             // (otherwise the app is only reachable via the menu-bar tray icon).
+            // A stealthed panel still counts as a visible window (it is
+            // ordered in, alpha 0), so in panel modes the Dock click always
+            // goes through the reveal path.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
                 ..
             } = &_event
             {
-                if !*has_visible_windows {
+                if !*has_visible_windows || menubar::panel_mode(_app_handle) {
                     window::show_main(_app_handle);
                 }
             }

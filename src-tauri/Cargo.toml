@@ -59,6 +59,8 @@ tauri-winrt-notification = "0.7"
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-local-authentication = { version = "0.3.2", features = ["LAContext", "block2"] }
 objc2 = "0.6"
+# The macOS main queue, used by menubar.rs to order panel transitions after geom changes
+dispatch2 = "0.3.1"
 block2 = "0.6"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

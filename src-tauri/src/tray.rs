@@ -39,6 +39,24 @@ const ICON_UNREAD: &[u8] = include_bytes!("../icons/tray-unread.png");
 /// `NSImage.isTemplate` is macOS-only; the flag is ignored elsewhere.
 const ICON_IS_TEMPLATE: bool = cfg!(target_os = "macos");
 
+/// Scale factor for converting a tray-event rect into physical px.
+#[cfg(target_os = "macos")]
+fn app_scale(app: &AppHandle) -> f64 {
+    let label = app
+        .try_state::<crate::accounts::ActiveAccount>()
+        .and_then(|a| a.lock().ok().map(|g| g.clone()));
+    if let Some(w) = label.as_deref().and_then(|l| app.get_webview_window(l)) {
+        if let Ok(s) = w.scale_factor() {
+            return s;
+        }
+    }
+    app.webview_windows()
+        .values()
+        .next()
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0)
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     // Placeholder menu; rebuild_menu fills in the per-account items at startup.
     let menu = MenuBuilder::new(app).build()?;
@@ -57,25 +75,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 return;
             }
             if let Some(acct_id) = id.strip_prefix("acct:") {
-                // Menu-bar-only mode prevents the main window from showing up.
-                #[cfg(target_os = "macos")]
-                if crate::settings::load(app).menubar_only {
-                    crate::window::menubar_reveal(app, None);
-                    return;
-                }
+                // In menu-bar-only mode show_account opens it as a panel.
                 crate::window::show_account(app, &accounts::window_label(acct_id));
                 return;
             }
             match id {
                 "accounts" | "settings" => crate::window::open_settings_window(app),
                 "reload" => {
-                    #[cfg(target_os = "macos")]
-                    if crate::settings::load(app).menubar_only {
-                        if let Some(w) = app.get_webview_window(crate::window::MENUBAR_LABEL) {
-                            let _ = w.eval("window.location.reload()");
-                        }
-                        return;
-                    }
                     if let Some(active) = app.try_state::<crate::accounts::ActiveAccount>() {
                         let label = active.lock().unwrap().clone();
                         if let Some(w) = app.get_webview_window(&label) {
@@ -84,7 +90,12 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 "lock" => crate::lock::lock_now(app),
-                "quit" => app.exit(0),
+                "quit" => {
+                    // Restore panel geometry before window state is saved.
+                    #[cfg(target_os = "macos")]
+                    crate::menubar::restore_all(app);
+                    app.exit(0)
+                }
                 _ => {}
             }
         })
@@ -93,13 +104,23 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
             } = &event
             {
-                // macOS, setting enabled: the tray icon toggles the menu bar popup
+                // macOS, a panel mode on: the tray icon toggles the menu-bar
+                // panel, anchored under this icon.
                 #[cfg(target_os = "macos")]
-                if crate::settings::load(tray.app_handle()).menubar_popup {
-                    crate::window::menubar_toggle_tray(tray.app_handle(), event.clone());
+                if crate::menubar::panel_mode(tray.app_handle()) {
+                    // The rect is a logical-or-physical enum; the active
+                    // window's scale factor resolves it to physical px.
+                    let scale = app_scale(tray.app_handle());
+                    let pos = rect.position.to_physical::<f64>(scale);
+                    let size = rect.size.to_physical::<f64>(scale);
+                    crate::menubar::tray_click(
+                        tray.app_handle(),
+                        Some((pos.x, pos.y, size.width, size.height)),
+                    );
                     return;
                 }
                 crate::window::show_active(tray.app_handle());
