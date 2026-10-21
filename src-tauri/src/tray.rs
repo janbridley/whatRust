@@ -104,23 +104,24 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
-                rect,
                 ..
             } = &event
             {
-                // macOS, a panel mode on: the tray icon toggles the menu-bar
+                // macOS, menu-bar mode on: the tray icon toggles the
                 // panel, anchored under this icon.
                 #[cfg(target_os = "macos")]
-                if crate::menubar::panel_mode(tray.app_handle()) {
-                    // The rect is a logical-or-physical enum; the active
-                    // window's scale factor resolves it to physical px.
-                    let scale = app_scale(tray.app_handle());
-                    let pos = rect.position.to_physical::<f64>(scale);
-                    let size = rect.size.to_physical::<f64>(scale);
-                    crate::menubar::tray_click(
-                        tray.app_handle(),
-                        Some((pos.x, pos.y, size.width, size.height)),
-                    );
+                if crate::menubar::enabled(tray.app_handle()) {
+                    if let TrayIconEvent::Click { rect, .. } = event {
+                        // The rect is a logical-or-physical enum; the active
+                        // window's scale factor resolves it to physical px.
+                        let scale = app_scale(tray.app_handle());
+                        let pos = rect.position.to_physical::<f64>(scale);
+                        let size = rect.size.to_physical::<f64>(scale);
+                        crate::menubar::tray_click(
+                            tray.app_handle(),
+                            Some((pos.x, pos.y, size.width, size.height)),
+                        );
+                    }
                     return;
                 }
                 crate::window::show_active(tray.app_handle());

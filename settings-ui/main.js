@@ -1,5 +1,5 @@
 const invoke = window.__TAURI__.core.invoke;
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_popup", "menubar_only"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_only"];
 const ZOOM_DEFAULT = 1;
 
 // The menu-bar rows are macOS-only. get_settings reports the OS this build targets
@@ -14,9 +14,13 @@ let menuBarIconSubtitle = "";
 
 // In menu-bar-only mode the tray icon is the app's only entry point and the
 // backend keeps it visible, so the switch is locked on.
+let menuBarIconChecked = true;
+
 function syncMenuBarIconRow() {
   const only = document.getElementById("menubar_only").checked;
-  document.getElementById("menu_bar_icon").disabled = only;
+  const icon = document.getElementById("menu_bar_icon");
+  icon.disabled = only;
+  icon.checked = only ? true : menuBarIconChecked;
   document.getElementById("menu_bar_icon_subtitle").textContent = only
     ? "The tray icon is the only entry point in menu-bar-only mode, so it stays visible"
     : menuBarIconSubtitle;
@@ -40,6 +44,7 @@ async function load() {
   }
   document.getElementById("hotkey").value = s.hotkey || "CmdOrCtrl+Shift+W";
   selectNearestZoom(Number.isFinite(s.zoom) ? s.zoom : ZOOM_DEFAULT);
+  menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
   syncMenuBarIconRow();
 }
 

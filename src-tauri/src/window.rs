@@ -152,7 +152,11 @@ pub fn open_account_window(
                         .is_ok();
                     // Nobody is looking at the window (hidden to the tray, or in
                     // the background): say it with a system notification too.
-                    let focused = webview.window().is_focused().unwrap_or(false);
+                    let mut focused = webview.window().is_focused().unwrap_or(false);
+                    #[cfg(target_os = "macos")]
+                    if crate::menubar::is_stealthed(webview.window().label()) {
+                        focused = false; // dismissed panel: nobody is watching
+                    }
                     if !shown || !focused {
                         if success {
                             let body = match done.as_ref().and_then(|(_, p)| p.file_name()) {
@@ -908,7 +912,7 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
                 *active.lock().unwrap() = label.clone();
             }
         }
-        // macOS panel modes: losing focus dismisses a presented panel into
+        // Menu-bar mode: losing focus dismisses a presented panel into
         // stealth, so the session stays connected.
         #[cfg(target_os = "macos")]
         tauri::WindowEvent::Focused(false) => {
@@ -1168,10 +1172,9 @@ pub fn show_active(app: &AppHandle) {
         crate::lock::show_lock_window(app);
         return;
     }
-    // macOS panel modes: "show the app" opens the panel while no standard
-    // window is up; with one up it is raised instead.
+    // Menu-bar mode: the panel is the app.
     #[cfg(target_os = "macos")]
-    if crate::menubar::panel_mode(app) && !crate::menubar::normal_window_visible(app) {
+    if crate::menubar::enabled(app) {
         crate::menubar::reveal(app, None, None);
         return;
     }
@@ -1228,9 +1231,9 @@ pub fn toggle_decision(active_visible: Option<bool>) -> ToggleAct {
 /// while locked. The "hide" path only triggers when an account window is visible,
 /// which cannot happen while locked.
 pub fn toggle_active(app: &AppHandle) {
-    // macOS panel modes: the shortcut toggles the panel.
+    // Menu-bar mode: the shortcut toggles the panel.
     #[cfg(target_os = "macos")]
-    if crate::menubar::panel_mode(app) {
+    if crate::menubar::enabled(app) {
         crate::menubar::toggle(app);
         return;
     }

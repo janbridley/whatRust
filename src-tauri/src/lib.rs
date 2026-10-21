@@ -272,7 +272,7 @@ pub fn run() {
             // macOS: clicking the dock icon after hide-to-tray re-shows the window
             // (otherwise the app is only reachable via the menu-bar tray icon).
             // A stealthed panel still counts as a visible window (it is
-            // ordered in, alpha 0), so in panel modes the Dock click always
+            // ordered in, alpha 0), so in menu-bar mode the Dock click always
             // goes through the reveal path.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
@@ -280,7 +280,7 @@ pub fn run() {
                 ..
             } = &_event
             {
-                if !*has_visible_windows || menubar::panel_mode(_app_handle) {
+                if !*has_visible_windows || menubar::enabled(_app_handle) {
                     window::show_main(_app_handle);
                 }
             }

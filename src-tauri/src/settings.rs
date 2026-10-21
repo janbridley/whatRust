@@ -9,13 +9,9 @@ pub struct Settings {
     pub hotkey_enabled: bool,
     pub hotkey: String,
     pub notifications: bool,
-    /// macOS only: clicking the tray icon opens the account's own window,
-    /// restyled as a compact panel under the menu bar icon, instead of
-    /// raising it. Off by default. Ignored on other platforms.
-    pub menubar_popup: bool,
     /// macOS only: the app lives in the menu bar, no Dock icon and no
     /// standard window. Every account stays connected in the background and
-    /// opens as a panel from the tray. Ignored on other platforms.
+    /// opens as a panel from the tray. Off by default. Ignored on other platforms.
     pub menubar_only: bool,
     /// Display zoom for the WhatsApp webview, 1.0 = the site's own sizing.
     pub zoom: f64,
@@ -34,7 +30,6 @@ impl Default for Settings {
             hotkey_enabled: true,
             hotkey: "CmdOrCtrl+Shift+W".to_string(),
             notifications: true,
-            menubar_popup: false,
             menubar_only: false,
             zoom: 1.0,
             menu_bar_icon: true,
@@ -160,7 +155,7 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
     #[cfg(not(target_os = "macos"))]
     crate::tray::apply_visibility(app, s.menu_bar_icon);
 
-    // macOS menu-bar modes: reconcile the live window set with the settings.
+    // macOS menu-bar mode: reconcile the live window set with the settings.
     #[cfg(target_os = "macos")]
     {
         if s.menubar_only {
@@ -280,8 +275,7 @@ mod tests {
         let s = Settings::default();
         assert!(s.close_to_tray);
         assert!(s.notifications);
-        // Both menu-bar modes are opt-in.
-        assert!(!s.menubar_popup);
+        // The menu-bar mode is opt-in.
         assert!(!s.menubar_only);
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");
         assert!(!s.autostart);

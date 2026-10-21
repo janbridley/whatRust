@@ -115,15 +115,15 @@ pub fn set_unread(
     // user hears about it even when WhatsApp raises its own notification where
     // whatRust can't see it (issue #3). Covered by a real notification, this
     // stays silent; see notify::unread_increased.
-    let mut focused = window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false);
+    // A dismissed panel is ordered in and may still be the key window, but
+    // the user is not looking at it. WhatsApp's page also believes it is
+    // foreground and raises no notification of its own, so the fallback must fire.
     #[cfg(target_os = "macos")]
-    if focused && crate::menubar::is_stealthed(window.label()) {
-        // A dismissed panel is ordered in and may still be the key window,
-        // but the user is not looking at it. WhatsApp's page also believes it
-        // is foreground and raises no notification of its own, so the
-        // fallback must fire.
-        focused = false;
-    }
+    let focused = window.is_focused().unwrap_or(false)
+        && window.is_visible().unwrap_or(false)
+        && !crate::menubar::is_stealthed(window.label());
+    #[cfg(not(target_os = "macos"))]
+    let focused = window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false);
     if crate::notify::fallback_due(previous, count, focused, settled.unwrap_or(false)) {
         crate::notify::unread_increased(&app, window.label(), count);
     }
@@ -131,7 +131,7 @@ pub fn set_unread(
 
 #[derive(Debug, serde::Serialize)]
 pub struct SettingsView {
-    /// Flattened, so the UI reads `settings.menubar_popup`  directly off the response.
+    /// Flattened, so the UI reads the settings fields directly off the response.
     #[serde(flatten)]
     pub settings: Settings,
     /// The OS this build targets ("macos" | "linux" | "windows").
@@ -362,11 +362,17 @@ pub async fn open_account(
         return Err(format!("unknown account: {id}"));
     };
     // Open the window if it was closed, then show + focus it.
+    // Hidden first in menu-bar-only mode: show_account presents it as a
+    // panel, and no full-size window flashes in between.
+    #[cfg(target_os = "macos")]
+    let start_hidden = crate::settings::load(&app).menubar_only;
+    #[cfg(not(target_os = "macos"))]
+    let start_hidden = false;
     if app
         .get_webview_window(&accounts::window_label(&acct.id))
         .is_none()
     {
-        crate::window::open_account_window(&app, acct, false).map_err(|e| e.to_string())?;
+        crate::window::open_account_window(&app, acct, start_hidden).map_err(|e| e.to_string())?;
     }
     crate::window::show_account(&app, &accounts::window_label(&acct.id));
     // Track as the active account.

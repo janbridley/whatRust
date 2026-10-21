@@ -1,4 +1,4 @@
-//! macOS menu-bar panel (`menubar_popup` / `menubar_only`).
+//! macOS menu-bar mode (`menubar_only`).
 //!
 //! The panel is the account's window (`wa-<id>`), restyled: one webview
 //! per account, one session per store, one notification per message. A
@@ -96,17 +96,6 @@ mod imp {
     struct ActivityPtr(*mut objc2::runtime::AnyObject);
     unsafe impl Send for ActivityPtr {}
 
-    /// Raw NSWindow handle. SAFETY: only dereferenced in main-queue blocks,
-    /// on the main thread as AppKit requires.
-    struct NsWindow(*mut objc2::runtime::AnyObject);
-    unsafe impl Send for NsWindow {}
-
-    impl NsWindow {
-        fn live(&self) -> bool {
-            !self.0.is_null()
-        }
-    }
-
     /// The main queue the macOS window setters are queued on. They apply
     /// asynchronously while `show()` applies immediately, so anything that
     /// must land after a setter runs through here.
@@ -115,37 +104,74 @@ mod imp {
         DispatchQueue::main().exec_async(f);
     }
 
-    fn ns_of(win: &WebviewWindow) -> Option<NsWindow> {
-        win.ns_window()
-            .ok()
-            .map(|p| NsWindow(p as *mut objc2::runtime::AnyObject))
-    }
-
     /// Window alpha. 0.0 keeps the window ordered in (alive to WebKit) but
-    /// invisible.
-    fn set_alpha(win: &WebviewWindow, alpha: f64) {
-        if let Some(ns) = ns_of(win) {
-            on_main_queue(move || unsafe {
-                if ns.live() {
-                    let _: () = objc2::msg_send![ns.0, setAlphaValue: alpha];
+    /// invisible. The window is looked up inside the block: a block holding a
+    /// window handle could outlive the window.
+    fn set_alpha(app: &AppHandle, label: &str, alpha: f64) {
+        let (app, label) = (app.clone(), label.to_string());
+        on_main_queue(move || unsafe {
+            if let Some(win) = app.get_webview_window(&label) {
+                if let Ok(p) = win.ns_window() {
+                    let ns = p as *mut objc2::runtime::AnyObject;
+                    let _: () = objc2::msg_send![ns, setAlphaValue: alpha];
                 }
-            });
-        }
+            }
+        });
     }
 
     /// Order a window in WITHOUT makeKey or activation, which would steal
     /// key focus from whatever the user switched to.
-    fn order_in_quietly(win: &WebviewWindow) {
-        set_alpha(win, 0.0);
-        let _ = win.set_ignore_cursor_events(true);
-        if let Some(ns) = ns_of(win) {
-            on_main_queue(move || unsafe {
-                if ns.live() {
-                    let _: () = objc2::msg_send![ns.0, orderFrontRegardless];
+    fn order_in_quietly(app: &AppHandle, label: &str) {
+        set_alpha(app, label, 0.0);
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.set_ignore_cursor_events(true);
+        }
+        let (app, label) = (app.clone(), label.to_string());
+        on_main_queue(move || unsafe {
+            if let Some(win) = app.get_webview_window(&label) {
+                if let Ok(p) = win.ns_window() {
+                    let ns = p as *mut objc2::runtime::AnyObject;
+                    let _: () = objc2::msg_send![ns, orderFrontRegardless];
                 }
-            });
-        } else {
-            let _ = win.show();
+            }
+        });
+    }
+
+    /// Hand the app back to whoever had it, so a dismissed panel does not
+    /// stay key and swallow keystrokes.
+    fn deactivate_app() {
+        on_main_queue(move || unsafe {
+            let cls = objc2::runtime::Class::get(c"NSApplication").expect("NSApplication class");
+            let app: *mut objc2::runtime::AnyObject = objc2::msg_send![cls, sharedApplication];
+            let _: () = objc2::msg_send![app, deactivate];
+        });
+    }
+
+    /// Apply a frame (outer position + inner size, physical px, top-left
+    /// origin) SYNCHRONOUSLY. The window setters apply asynchronously, which
+    /// is fine while the app runs, but the exit saves window state before
+    /// queued work can land, so a panel restore at quit has to be immediate.
+    /// Must run on the main thread.
+    fn apply_frame_sync(win: &WebviewWindow, app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        let Ok(p) = win.ns_window() else {
+            return;
+        };
+        let scale = win.scale_factor().unwrap_or(1.0);
+        // NSWindow frames are in points with a bottom-left origin.
+        let (x, y) = (x as f64 / scale, y as f64 / scale);
+        let (w, h) = (w as f64 / scale, h as f64 / scale);
+        let main_h = app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| m.size().height as f64 / m.scale_factor())
+            .unwrap_or(1050.0);
+        let frame = CGRect::new(CGPoint::new(x, main_h - y - h), CGSize::new(w, h));
+        unsafe {
+            let ns = p as *mut objc2::runtime::AnyObject;
+            let no: bool = false;
+            let _: () = objc2::msg_send![ns, setFrame: frame display: no];
         }
     }
 
@@ -190,10 +216,9 @@ mod imp {
         }
     }
 
-    /// Whether either menu-bar setting is on (the panel is the tray-click UX).
-    pub fn panel_mode(app: &AppHandle) -> bool {
-        let s = crate::settings::load(app);
-        s.menubar_popup || s.menubar_only
+    /// Whether menu-bar mode is on: the panel is the app.
+    pub fn enabled(app: &AppHandle) -> bool {
+        crate::settings::load(app).menubar_only
     }
 
     /// The account a panel targets: the active one, else the first by order.
@@ -249,9 +274,22 @@ mod imp {
             }
         }
         // The panel goes on the monitor holding the tray icon, which can be
-        // a different screen than the window is parked on.
+        // a different screen than the window is parked on. The rect is
+        // physical px, so hit-test against the physical monitor bounds.
         let monitor = rect
-            .and_then(|(x, y, ..)| app.monitor_from_point(x, y).ok().flatten())
+            .and_then(|(x, y, ..)| {
+                app.available_monitors()
+                    .ok()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|m| {
+                        let p = m.position();
+                        let s = m.size();
+                        let (l, t) = (p.x as f64, p.y as f64);
+                        let (r, b) = (l + s.width as f64, t + s.height as f64);
+                        x >= l && y >= t && x < r && y < b
+                    })
+            })
             .or_else(|| win.current_monitor().ok().flatten())
             .or_else(|| win.primary_monitor().ok().flatten());
         let scale = monitor
@@ -305,7 +343,7 @@ mod imp {
             let _ = w.show();
             let _ = w.set_focus();
         });
-        set_alpha(&win, 1.0);
+        set_alpha(app, &label, 1.0);
         set_presented(Some(label));
     }
 
@@ -318,16 +356,18 @@ mod imp {
             with_restyled(|m| m.remove(label));
             return;
         };
-        if presented().as_deref() == Some(label) {
+        let was_presented = presented().as_deref() == Some(label);
+        if was_presented {
             set_presented(None);
             if let Ok(mut t) = LAST_HIDE.lock() {
                 *t = Some(Instant::now());
             }
+            deactivate_app();
         }
-        set_alpha(&win, 0.0);
+        set_alpha(app, label, 0.0);
         let _ = win.set_ignore_cursor_events(true);
         if !win.is_visible().unwrap_or(true) {
-            order_in_quietly(&win);
+            order_in_quietly(app, label);
         }
     }
 
@@ -349,28 +389,53 @@ mod imp {
             set_presented(None);
         }
         if let Some(win) = app.get_webview_window(label) {
+            set_alpha(app, label, 0.0);
             let _ = win.set_ignore_cursor_events(false);
             let _ = win.set_always_on_top(false);
             let _ = win.set_resizable(true);
             let _ = win.set_decorations(true);
-            let _ = win.set_size(PhysicalSize::new(w, h));
-            let _ = win.set_position(PhysicalPosition::new(x, y));
-            set_alpha(&win, 1.0); // queued after the geometry: no panel-frame flash
+            apply_frame_sync(&win, app, x, y, w, h);
+            set_alpha(app, label, 1.0);
         }
         true
     }
 
-    /// Restore every restyled window. Called when a panel mode is left, and
-    /// on quit before window state is saved.
+    /// Restore every restyled window. Called when menu-bar mode is left,
+    /// and on quit before window state is saved. Windows that were dismissed
+    /// stay off screen except the active one, which the caller shows.
     pub fn restore_all(app: &AppHandle) {
         let labels: Vec<String> =
             with_restyled(|m| m.keys().cloned().collect()).unwrap_or_default();
+        let active = app
+            .try_state::<ActiveAccount>()
+            .and_then(|a| a.lock().ok().map(|g| g.clone()));
         for label in labels {
+            let dismissed = is_stealthed(&label);
             restore_window(app, &label);
+            if dismissed && Some(label.clone()) != active {
+                if let Some(win) = app.get_webview_window(&label) {
+                    let _ = win.hide();
+                }
+            }
         }
     }
 
-    /// Tray left-click in a panel mode.
+    /// After an unlock, put a window the lock hid back how it was: the
+    /// presented panel returns as a panel, a dismissed one stays dismissed.
+    /// Returns false when the window was never restyled.
+    pub fn restore_after_lock(app: &AppHandle, label: &str) -> bool {
+        if !is_restyled(label) {
+            return false;
+        }
+        if presented().as_deref() == Some(label) {
+            reveal(app, Some(label), None);
+        } else {
+            order_in_quietly(app, label);
+        }
+        true
+    }
+
+    /// Tray left-click in menu-bar mode.
     pub fn tray_click(app: &AppHandle, rect: Option<(f64, f64, f64, f64)>) {
         if !crate::lock::is_unlocked(app) {
             crate::lock::show_lock_window(app);
@@ -389,46 +454,13 @@ mod imp {
         {
             return; // this very click dismissed the panel
         }
-        // A standard window is up: raise it, as with the panel settings off.
-        if !crate::settings::load(app).menubar_only && normal_window_visible(app) {
-            crate::window::show_active(app);
-            return;
-        }
         reveal(app, None, rect);
     }
 
-    /// The shortcut / `whatrust --toggle` in a panel mode: presented ->
-    /// stealthed, a visible standard window -> hidden, otherwise -> presented.
+    /// The shortcut / `whatrust --toggle`: presented -> stealthed,
+    /// otherwise -> presented.
     pub fn toggle(app: &AppHandle) {
-        if !crate::lock::is_unlocked(app) {
-            crate::lock::show_lock_window(app);
-            return;
-        }
-        if let Some(label) = panel_on_screen(app) {
-            stealth(app, &label);
-            return;
-        }
-        if !crate::settings::load(app).menubar_only {
-            let label = app
-                .try_state::<ActiveAccount>()
-                .and_then(|a| a.lock().ok().map(|g| g.clone()))
-                .filter(|l| !is_restyled(l));
-            if let Some(w) = label.and_then(|l| app.get_webview_window(&l)) {
-                if w.is_visible().unwrap_or(false) {
-                    let _ = w.hide();
-                    return;
-                }
-            }
-        }
-        reveal(app, None, None);
-    }
-
-    /// Whether a standard (non-restyled) account window is visible, in which
-    /// case a "show the app" request raises it instead of opening a panel.
-    pub fn normal_window_visible(app: &AppHandle) -> bool {
-        app.webview_windows().iter().any(|(l, w)| {
-            l.starts_with("wa-") && !is_restyled(l) && w.is_visible().unwrap_or(false)
-        })
+        tray_click(app, None);
     }
 
     /// Menu-bar-only mode: no standard windows. Every account KEEPS its
@@ -450,7 +482,7 @@ mod imp {
                     m.entry(label.clone())
                         .or_insert((pos.x, pos.y, size.width, size.height));
                 });
-                order_in_quietly(&win);
+                order_in_quietly(app, &label);
             }
         }
         ONLY_MODE.store(true, Ordering::Release);

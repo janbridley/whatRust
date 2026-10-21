@@ -90,6 +90,11 @@ pub fn unlock(app: &AppHandle) {
         crate::window::show_active(app);
     } else {
         for label in hidden {
+            // A menu-bar window goes back to how it was: presented panel or dismissed.
+            #[cfg(target_os = "macos")]
+            if crate::menubar::restore_after_lock(app, &label) {
+                continue;
+            }
             crate::window::show_account(app, &label);
         }
     }
