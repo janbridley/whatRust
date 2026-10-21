@@ -58,6 +58,13 @@ impl Settings {
     /// Repair values an older or hand-edited settings.json can carry.
     pub fn sanitized(mut self) -> Self {
         self.zoom = sanitize_zoom(self.zoom);
+        // Menu-bar-only mode needs WKWebView's inactive-scheduling policy
+        // (macOS 14+). Dropping the flag here means a settings file or an
+        // older build can never leave the app in a mode it cannot sustain.
+        #[cfg(target_os = "macos")]
+        if !crate::menubar::supported() {
+            self.menubar_only = false;
+        }
         self
     }
 }
@@ -148,17 +155,23 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
     // effect on the open account windows without a reload.
     crate::window::apply_zoom_all(app, s.zoom);
 
+    // Menu-bar mode is only available where a hidden WKWebView keeps running
+    // (macOS 14+); elsewhere the setting is ignored rather than dropping every
+    // account's session the moment it is enabled.
+    #[cfg(target_os = "macos")]
+    let menubar_only = s.menubar_only && crate::menubar::supported();
+
     // In menu-bar-only mode the tray icon is the app's only entry point, so
     // it can never be hidden.
     #[cfg(target_os = "macos")]
-    crate::tray::apply_visibility(app, s.menu_bar_icon || s.menubar_only);
+    crate::tray::apply_visibility(app, s.menu_bar_icon || menubar_only);
     #[cfg(not(target_os = "macos"))]
     crate::tray::apply_visibility(app, s.menu_bar_icon);
 
     // macOS menu-bar mode: reconcile the live window set with the settings.
     #[cfg(target_os = "macos")]
     {
-        if s.menubar_only {
+        if menubar_only {
             crate::menubar::enter_only(app);
         } else if crate::menubar::leave_only(app) {
             // Leaving menu-bar-only mode: reopen missing windows and show the
@@ -173,7 +186,7 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         }
 
         // Menu-bar-only apps have no Dock presence.
-        let policy = if s.menubar_only {
+        let policy = if menubar_only {
             tauri::ActivationPolicy::Accessory
         } else {
             tauri::ActivationPolicy::Regular
@@ -184,7 +197,7 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         });
 
         // Hold the App Nap shield only while menu-bar-only mode is on.
-        crate::menubar::set_keep_alive(s.menubar_only);
+        crate::menubar::set_keep_alive(menubar_only);
     }
 
     #[cfg(desktop)]

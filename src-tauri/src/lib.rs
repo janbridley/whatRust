@@ -189,9 +189,9 @@ pub fn run() {
             let open_hidden = start_hidden || lock_on_launch;
 
             // Open every account window so each one receives messages/notifications.
-            // In menu-bar-only mode they stay permanently invisible (ordered in,
-            // alpha 0, click-through) so every account stays connected; the tray opens
-            // them as panels.
+            // In menu-bar-only mode they start hidden: the inactive-scheduling
+            // policy keeps every account connected while hidden, and the tray
+            // opens them as panels.
             #[cfg(target_os = "macos")]
             let open_hidden = open_hidden || s.menubar_only;
             for a in &f.accounts {
@@ -271,16 +271,16 @@ pub fn run() {
 
             // macOS: clicking the dock icon after hide-to-tray re-shows the window
             // (otherwise the app is only reachable via the menu-bar tray icon).
-            // A stealthed panel still counts as a visible window (it is
-            // ordered in, alpha 0), so in menu-bar mode the Dock click always
-            // goes through the reveal path.
+            // A dismissed menu-bar panel is hidden like any other window, so
+            // `has_visible_windows` alone decides; `show_main` handles the
+            // menu-bar case by revealing the panel.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
                 ..
             } = &_event
             {
-                if !*has_visible_windows || menubar::enabled(_app_handle) {
+                if !*has_visible_windows {
                     window::show_main(_app_handle);
                 }
             }

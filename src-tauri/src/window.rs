@@ -1,4 +1,5 @@
 use crate::accounts::{self, Account, ActiveAccount};
+use tauri::utils::config::BackgroundThrottlingPolicy;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// Recent desktop Chrome UA (Linux, Windows). WhatsApp Web rejects the default
@@ -152,11 +153,7 @@ pub fn open_account_window(
                         .is_ok();
                     // Nobody is looking at the window (hidden to the tray, or in
                     // the background): say it with a system notification too.
-                    let mut focused = webview.window().is_focused().unwrap_or(false);
-                    #[cfg(target_os = "macos")]
-                    if crate::menubar::is_stealthed(webview.window().label()) {
-                        focused = false; // dismissed panel: nobody is watching
-                    }
+                    let focused = webview.window().is_focused().unwrap_or(false);
                     if !shown || !focused {
                         if success {
                             let body = match done.as_ref().and_then(|(_, p)| p.file_name()) {
@@ -180,6 +177,13 @@ pub fn open_account_window(
             }
             true
         })
+        // Keep the page running while the window is hidden or minimized:
+        // WebKit's default for an inactive WKWebView is to suspend it, which
+        // drops WhatsApp's WebSocket after a few minutes in the tray (and in
+        // menu-bar mode, between panels). `Throttle` still clamps timers to
+        // keep battery use down, but the page and its socket stay alive.
+        // No-op before macOS 14, where the OS offers no such policy.
+        .background_throttling(BackgroundThrottlingPolicy::Throttle)
         .visible(!start_hidden);
 
     // Windows (issue #31): WebView2 is Chromium and delivers OS file drops to the
@@ -912,8 +916,8 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
                 *active.lock().unwrap() = label.clone();
             }
         }
-        // Menu-bar mode: losing focus dismisses a presented panel into
-        // stealth, so the session stays connected.
+        // Menu-bar mode: losing focus dismisses a presented panel; the
+        // webview keeps running while hidden (see `background_throttling`).
         #[cfg(target_os = "macos")]
         tauri::WindowEvent::Focused(false) => {
             crate::menubar::on_focus_lost(&app_handle, &label);
@@ -1150,7 +1154,7 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
 /// menu-bar-only mode it opens as a panel.
 pub fn show_account(app: &AppHandle, label: &str) {
     #[cfg(target_os = "macos")]
-    if crate::settings::load(app).menubar_only {
+    if crate::menubar::enabled(app) {
         crate::menubar::reveal(app, Some(label), None);
         return;
     }

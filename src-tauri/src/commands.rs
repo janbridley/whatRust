@@ -114,15 +114,8 @@ pub fn set_unread(
     // A new unread chat while the window is in the background: make sure the
     // user hears about it even when WhatsApp raises its own notification where
     // whatRust can't see it (issue #3). Covered by a real notification, this
-    // stays silent; see notify::unread_increased.
-    // A dismissed panel is ordered in and may still be the key window, but
-    // the user is not looking at it. WhatsApp's page also believes it is
-    // foreground and raises no notification of its own, so the fallback must fire.
-    #[cfg(target_os = "macos")]
-    let focused = window.is_focused().unwrap_or(false)
-        && window.is_visible().unwrap_or(false)
-        && !crate::menubar::is_stealthed(window.label());
-    #[cfg(not(target_os = "macos"))]
+    // stays silent; see notify::unread_increased. A dismissed menu-bar panel
+    // is a hidden window, so `is_visible()` already says nobody is watching.
     let focused = window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false);
     if crate::notify::fallback_due(previous, count, focused, settled.unwrap_or(false)) {
         crate::notify::unread_increased(&app, window.label(), count);
@@ -137,6 +130,10 @@ pub struct SettingsView {
     /// The OS this build targets ("macos" | "linux" | "windows").
     /// The settings UI shows the platform-only rows only on macOS.
     pub platform: &'static str,
+    /// Whether menu-bar-only mode works on this machine (macOS 14+; see
+    /// `menubar::supported`). The UI disables the switch elsewhere rather
+    /// than letting the user opt into a mode that would drop the session.
+    pub menubar_supported: bool,
 }
 
 #[tauri::command]
@@ -148,6 +145,7 @@ pub fn get_settings(window: tauri::Window, app: tauri::AppHandle) -> Result<Sett
     Ok(SettingsView {
         settings: crate::settings::load(&app),
         platform: std::env::consts::OS,
+        menubar_supported: crate::menubar::supported(),
     })
 }
 
@@ -251,10 +249,7 @@ pub async fn add_account(
 
     // In menu-bar-only mode the window is created hidden and presented as a
     // panel right after, so no full-size window flashes.
-    #[cfg(target_os = "macos")]
-    let start_hidden = crate::settings::load(&app).menubar_only;
-    #[cfg(not(target_os = "macos"))]
-    let start_hidden = false;
+    let start_hidden = crate::menubar::enabled(&app);
     if let Err(e) = crate::window::open_account_window(&app, &acct, start_hidden) {
         // Don't leave an account behind that never got a window. The sequence
         // number stays consumed, so a retry gets a fresh profile id.
@@ -364,10 +359,7 @@ pub async fn open_account(
     // Open the window if it was closed, then show + focus it.
     // Hidden first in menu-bar-only mode: show_account presents it as a
     // panel, and no full-size window flashes in between.
-    #[cfg(target_os = "macos")]
-    let start_hidden = crate::settings::load(&app).menubar_only;
-    #[cfg(not(target_os = "macos"))]
-    let start_hidden = false;
+    let start_hidden = crate::menubar::enabled(&app);
     if app
         .get_webview_window(&accounts::window_label(&acct.id))
         .is_none()

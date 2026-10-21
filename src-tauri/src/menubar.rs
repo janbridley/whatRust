@@ -2,10 +2,11 @@
 //!
 //! The panel is the account's window (`wa-<id>`), restyled: one webview
 //! per account, one session per store, one notification per message. A
-//! dismissed panel is not hidden but STEALTHED: ordered in, alpha 0,
-//! click-through. Hiding the window would let WebKit suspend the page, which
-//! drops WhatsApp's socket. The geometry captured before the first restyle is
-//! replayed when the window goes back to normal.
+//! dismissed panel is a hidden window whose page keeps running: account
+//! windows set the WKWebView inactive-scheduling policy to `throttle`
+//! (macOS 14+, Tauri's `background_throttling`), so WhatsApp's socket stays
+//! up while nothing is on screen. The geometry captured before the first
+//! restyle is replayed when the window goes back to normal.
 
 /// Pure helpers, unit-tested on every platform (the panel is macOS-only).
 pub(crate) mod geom {
@@ -104,44 +105,11 @@ mod imp {
         DispatchQueue::main().exec_async(f);
     }
 
-    /// Window alpha. 0.0 keeps the window ordered in (alive to WebKit) but
-    /// invisible. The window is looked up inside the block: a block holding a
-    /// window handle could outlive the window.
-    fn set_alpha(app: &AppHandle, label: &str, alpha: f64) {
-        let (app, label) = (app.clone(), label.to_string());
-        on_main_queue(move || unsafe {
-            if let Some(win) = app.get_webview_window(&label) {
-                if let Ok(p) = win.ns_window() {
-                    let ns = p as *mut objc2::runtime::AnyObject;
-                    let _: () = objc2::msg_send![ns, setAlphaValue: alpha];
-                }
-            }
-        });
-    }
-
-    /// Order a window in WITHOUT makeKey or activation, which would steal
-    /// key focus from whatever the user switched to.
-    fn order_in_quietly(app: &AppHandle, label: &str) {
-        set_alpha(app, label, 0.0);
-        if let Some(win) = app.get_webview_window(label) {
-            let _ = win.set_ignore_cursor_events(true);
-        }
-        let (app, label) = (app.clone(), label.to_string());
-        on_main_queue(move || unsafe {
-            if let Some(win) = app.get_webview_window(&label) {
-                if let Ok(p) = win.ns_window() {
-                    let ns = p as *mut objc2::runtime::AnyObject;
-                    let _: () = objc2::msg_send![ns, orderFrontRegardless];
-                }
-            }
-        });
-    }
-
     /// Hand the app back to whoever had it, so a dismissed panel does not
     /// stay key and swallow keystrokes.
     fn deactivate_app() {
         on_main_queue(move || unsafe {
-            let cls = objc2::runtime::Class::get(c"NSApplication").expect("NSApplication class");
+            let cls = objc2::runtime::AnyClass::get(c"NSApplication").expect("NSApplication class");
             let app: *mut objc2::runtime::AnyObject = objc2::msg_send![cls, sharedApplication];
             let _: () = objc2::msg_send![app, deactivate];
         });
@@ -171,7 +139,7 @@ mod imp {
         unsafe {
             let ns = p as *mut objc2::runtime::AnyObject;
             let no: bool = false;
-            let _: () = objc2::msg_send![ns, setFrame: frame display: no];
+            let _: () = objc2::msg_send![ns, setFrame: frame, display: no];
         }
     }
 
@@ -184,10 +152,9 @@ mod imp {
         with_restyled(|m| m.contains_key(label)).unwrap_or(false)
     }
 
-    /// A dismissed panel: restyled but not presented. It is ordered in (so
-    /// `is_visible()` is true) and may still be the key window, but the user
-    /// is not looking at it.
-    pub fn is_stealthed(label: &str) -> bool {
+    /// A dismissed panel: restyled but not presented, i.e. its window is
+    /// hidden (`is_visible()` is false and it cannot take clicks).
+    pub fn is_dismissed(label: &str) -> bool {
         is_restyled(label) && presented().as_deref() != Some(label)
     }
 
@@ -214,11 +181,6 @@ mod imp {
             set_presented(None);
             None
         }
-    }
-
-    /// Whether menu-bar mode is on: the panel is the app.
-    pub fn enabled(app: &AppHandle) -> bool {
-        crate::settings::load(app).menubar_only
     }
 
     /// The account a panel targets: the active one, else the first by order.
@@ -270,7 +232,7 @@ mod imp {
         };
         if let Some(other) = presented() {
             if other != label {
-                stealth(app, &other); // one panel at a time
+                dismiss(app, &other); // one panel at a time
             }
         }
         // The panel goes on the monitor holding the tray icon, which can be
@@ -333,22 +295,22 @@ mod imp {
             mon_pos.x + x.max(0.0) as i32,
             mon_pos.y + y.max(0.0) as i32,
         ));
-        let _ = win.set_ignore_cursor_events(false);
         // show() would run ahead of the setters above and flash the old
-        // full-size frame; queued here it runs after them. The window may be
-        // stealthed (alpha 0), so it appears at its final size and position
-        // while still invisible, and the alpha queued after reveals it.
+        // full-size frame; queued here it runs after them. The window is
+        // hidden, so it appears at its final size and position. PRESENTED is
+        // published in the same block, once the window is really on screen.
         let w = win.clone();
         on_main_queue(move || {
+            let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
+            set_presented(Some(label));
         });
-        set_alpha(app, &label, 1.0);
-        set_presented(Some(label));
     }
 
-    /// Dismiss the panel but KEEP IT ALIVE: ordered in, alpha 0, click-through.
-    pub fn stealth(app: &AppHandle, label: &str) {
+    /// Dismiss the panel but KEEP IT ALIVE: hide the window. The webview
+    /// keeps running while hidden (see `background_throttling`).
+    pub fn dismiss(app: &AppHandle, label: &str) {
         let Some(win) = app.get_webview_window(label) else {
             if presented().as_deref() == Some(label) {
                 set_presented(None); // window gone
@@ -358,23 +320,23 @@ mod imp {
         };
         let was_presented = presented().as_deref() == Some(label);
         if was_presented {
+            // Clear PRESENTED before hiding: the hide triggers Focused(false),
+            // which must not re-enter this dismissal.
             set_presented(None);
             if let Ok(mut t) = LAST_HIDE.lock() {
                 *t = Some(Instant::now());
             }
-            deactivate_app();
         }
-        set_alpha(app, label, 0.0);
-        let _ = win.set_ignore_cursor_events(true);
-        if !win.is_visible().unwrap_or(true) {
-            order_in_quietly(app, label);
+        let _ = win.hide();
+        if was_presented {
+            deactivate_app();
         }
     }
 
     /// Focus-loss dismissal of a presented panel.
     pub fn on_focus_lost(app: &AppHandle, label: &str) {
         if crate::lock::is_unlocked(app) && presented().as_deref() == Some(label) {
-            stealth(app, label);
+            dismiss(app, label);
         }
     }
 
@@ -389,13 +351,10 @@ mod imp {
             set_presented(None);
         }
         if let Some(win) = app.get_webview_window(label) {
-            set_alpha(app, label, 0.0);
-            let _ = win.set_ignore_cursor_events(false);
             let _ = win.set_always_on_top(false);
             let _ = win.set_resizable(true);
             let _ = win.set_decorations(true);
             apply_frame_sync(&win, app, x, y, w, h);
-            set_alpha(app, label, 1.0);
         }
         true
     }
@@ -410,7 +369,7 @@ mod imp {
             .try_state::<ActiveAccount>()
             .and_then(|a| a.lock().ok().map(|g| g.clone()));
         for label in labels {
-            let dismissed = is_stealthed(&label);
+            let dismissed = is_dismissed(&label);
             restore_window(app, &label);
             if dismissed && Some(label.clone()) != active {
                 if let Some(win) = app.get_webview_window(&label) {
@@ -421,7 +380,7 @@ mod imp {
     }
 
     /// After an unlock, put a window the lock hid back how it was: the
-    /// presented panel returns as a panel, a dismissed one stays dismissed.
+    /// presented panel returns as a panel, a dismissed one stays hidden.
     /// Returns false when the window was never restyled.
     pub fn restore_after_lock(app: &AppHandle, label: &str) -> bool {
         if !is_restyled(label) {
@@ -429,8 +388,8 @@ mod imp {
         }
         if presented().as_deref() == Some(label) {
             reveal(app, Some(label), None);
-        } else {
-            order_in_quietly(app, label);
+        } else if let Some(win) = app.get_webview_window(label) {
+            let _ = win.hide();
         }
         true
     }
@@ -442,7 +401,7 @@ mod imp {
             return;
         }
         if let Some(label) = panel_on_screen(app) {
-            stealth(app, &label);
+            dismiss(app, &label);
             return;
         }
         if rect.is_some()
@@ -457,16 +416,20 @@ mod imp {
         reveal(app, None, rect);
     }
 
-    /// The shortcut / `whatrust --toggle`: presented -> stealthed,
+    /// The shortcut / `whatrust --toggle`: presented -> dismissed,
     /// otherwise -> presented.
     pub fn toggle(app: &AppHandle) {
         tray_click(app, None);
     }
 
     /// Menu-bar-only mode: no standard windows. Every account KEEPS its
-    /// webview, stealthed and connected, so notifications keep arriving. A
-    /// presented panel stays up and stealths on its next focus loss.
+    /// webview, hidden and connected (the inactive-scheduling policy keeps
+    /// the page running), so notifications keep arriving. A presented panel
+    /// stays up and hides on its next focus loss.
     pub fn enter_only(app: &AppHandle) {
+        if !supported() {
+            return; // macOS < 14: a hidden webview would be suspended
+        }
         for a in crate::accounts::load(app).accounts {
             let label = crate::accounts::window_label(&a.id);
             if app.get_webview_window(&label).is_none() {
@@ -482,7 +445,7 @@ mod imp {
                     m.entry(label.clone())
                         .or_insert((pos.x, pos.y, size.width, size.height));
                 });
-                order_in_quietly(app, &label);
+                let _ = win.hide();
             }
         }
         ONLY_MODE.store(true, Ordering::Release);
@@ -503,9 +466,25 @@ mod imp {
         ONLY_MODE.store(menubar_only, Ordering::Release);
     }
 
+    /// Whether menu-bar-only mode can work on this machine. A hidden webview
+    /// keeps its page (and WhatsApp's socket) alive only on macOS 14+, where
+    /// WKWebView honours the inactive-scheduling policy (Tauri's
+    /// `background_throttling`). On macOS 12 and 13 a hidden page is
+    /// suspended, so the mode is not offered.
+    pub fn supported() -> bool {
+        use objc2_foundation::NSProcessInfo;
+        let major = NSProcessInfo::processInfo()
+            .operatingSystemVersion()
+            .majorVersion;
+        super::allowed_from_version(major as i64)
+    }
+
     /// Hold a `UserInitiatedAllowingIdleSystemSleep` activity so App Nap
-    /// does not suspend the never-visible webviews. Held ONLY while
-    /// menu-bar-only mode is on: a window app keeps the default power policy.
+    /// does not slow the app's own timers (the unread fallback, tray menu
+    /// rebuilds) while menu-bar-only mode runs. The webviews stay alive via
+    /// `background_throttling`; this only covers the Rust side. Held ONLY
+    /// while menu-bar-only mode is on: a window app keeps the default power
+    /// policy.
     pub fn set_keep_alive(on: bool) {
         let Ok(mut slot) = KEEP_ALIVE.lock() else {
             return;
@@ -540,3 +519,36 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 pub use imp::*;
+
+/// Menu-bar-only mode is macOS-only; other platforms have no panel mode.
+#[cfg(not(target_os = "macos"))]
+pub fn supported() -> bool {
+    false
+}
+
+/// Whether menu-bar-only mode is on: the panel is the app. The `supported`
+/// gate keeps a settings file (or a build that ran on macOS 14+) from putting
+/// an older Mac into a mode whose webviews would be suspended when hidden.
+pub fn enabled(app: &tauri::AppHandle) -> bool {
+    supported() && crate::settings::load(app).menubar_only
+}
+
+/// Whether `major` is a macOS version whose WKWebView honours the
+/// inactive-scheduling policy (macOS 14, where `inactiveSchedulingPolicy`
+/// shipped). Pure, so the gate is testable without an OS look-up.
+pub(crate) fn allowed_from_version(major: i64) -> bool {
+    major >= 14
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allowed_from_version;
+
+    #[test]
+    fn menu_bar_mode_needs_the_macos14_scheduling_policy() {
+        assert!(!allowed_from_version(12));
+        assert!(!allowed_from_version(13));
+        assert!(allowed_from_version(14));
+        assert!(allowed_from_version(15));
+    }
+}

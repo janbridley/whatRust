@@ -42,6 +42,15 @@ async function load() {
     const el = document.getElementById(f);
     if (el) el.checked = !!s[f];
   }
+  // Menu-bar-only needs WKWebView's inactive-scheduling policy (macOS 14+).
+  // Below that the backend ignores the setting, so don't offer the switch.
+  const menubarOnly = document.getElementById("menubar_only");
+  menubarOnly.disabled = !s.menubar_supported;
+  if (s.platform === "macos" && !s.menubar_supported) {
+    menubarOnly.checked = false;
+    document.getElementById("menubar_only_subtitle").textContent =
+      "Requires macOS 14 (Sonoma) or later — this Mac cannot keep a hidden panel connected";
+  }
   document.getElementById("hotkey").value = s.hotkey || "CmdOrCtrl+Shift+W";
   selectNearestZoom(Number.isFinite(s.zoom) ? s.zoom : ZOOM_DEFAULT);
   menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
